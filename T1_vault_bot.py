@@ -11,7 +11,7 @@ paypalrestsdk.configure({
     "client_secret": os.getenv("PAYPAL_SECRET_KEY")
 })
 
-# Retrieve Telegram Bot Token
+# Telegram Bot Token
 TELEGRAM_API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 
 if not TELEGRAM_API_TOKEN:
@@ -20,15 +20,17 @@ if not TELEGRAM_API_TOKEN:
 # Vault Goal
 goal_inventory = 1000  # Vault target amount in USD
 
+# Allowed Topic ID
+ALLOWED_TOPIC_ID = 4437  # Replace with your specific Topic ID
+
 # Function to Retrieve PayPal Balance
 def get_paypal_balance():
     try:
-        # Fetch PayPal account balance
         balance_response = paypalrestsdk.Balance.retrieve()
         for currency in balance_response['balances']:
             if currency['currency_code'] == "USD":
                 return float(currency['total_available'])
-        return 0.0  # Default to zero if no USD balance is found
+        return 0.0
     except Exception as e:
         print(f"Error retrieving PayPal balance: {e}")
         return 0.0
@@ -43,14 +45,19 @@ def generate_progress_bar(current, goal):
     plt.title(f"Vault Progress: ${current:.2f} / ${goal}")
     plt.xlabel("Amount in USD")
     plt.legend()
-
-    # Save the chart
     plt.tight_layout()
     plt.savefig("vault_inventory.png")
     plt.close()
 
+# Restrict to Allowed Topic
+def is_valid_topic(update: Update) -> bool:
+    """Check if the message is in the allowed topic."""
+    return update.message.message_thread_id == ALLOWED_TOPIC_ID
+
 # Start Command Handler
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_valid_topic(update):
+        return
     await update.message.reply_text(
         "Hi Sir, I am the T1 Vault Bot!\n"
         "Use /vault to see the current vault status.\n"
@@ -59,6 +66,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Vault Status Command
 async def show_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_valid_topic(update):
+        return
     current_inventory = get_paypal_balance()
     generate_progress_bar(current_inventory, goal_inventory)
     chat_id = update.effective_chat.id
@@ -66,22 +75,22 @@ async def show_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open("vault_inventory.png", 'rb') as photo:
             await context.bot.send_photo(chat_id=chat_id, photo=photo, caption=f"Vault Progress: ${current_inventory:.2f}")
     finally:
-        # Clean up the generated image
         if os.path.exists("vault_inventory.png"):
             os.remove("vault_inventory.png")
 
 # Donation Command
 async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Create a payment request
+    if not is_valid_topic(update):
+        return
     payment = paypalrestsdk.Payment({
         "intent": "sale",
         "payer": {"payment_method": "paypal"},
         "redirect_urls": {
-            "return_url": "https://github.com/NickHeight/success/blob/main/success.html",  # Retained custom return URL
-            "cancel_url": "https://github.com/NickHeight/Cancel/blob/main/cancel.html"   # Retained custom cancel URL
+            "return_url": "https://github.com/NickHeight/success/blob/main/success.html",
+            "cancel_url": "https://github.com/NickHeight/Cancel/blob/main/cancel.html"
         },
         "transactions": [{
-            "amount": {"total": "10.00", "currency": "USD"},  # Default donation of $10
+            "amount": {"total": "10.00", "currency": "USD"},
             "description": "Telegram Vault Contribution"
         }]
     })
@@ -97,18 +106,13 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Main Function
 def main():
-    # Debugging: Print token to verify it's being retrieved
     print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
-
-    # Build Application
     app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
-    # Command Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("vault", show_vault))
     app.add_handler(CommandHandler("donate", donate))
 
-    # Start the Bot
     print("Bot is running...")
     app.run_polling()
 
