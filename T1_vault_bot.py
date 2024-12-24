@@ -7,12 +7,15 @@ import os
 # PayPal Configuration
 paypalrestsdk.configure({
     "mode": "live",  # Change to "sandbox" for testing
-    "client_id": "YOUR_PAYPAL_CLIENT_ID",
-    "client_secret": "YOUR_PAYPAL_SECRET_KEY"
+    "client_id": os.getenv("PAYPAL_CLIENT_ID"),
+    "client_secret": os.getenv("PAYPAL_SECRET_KEY")
 })
 
-# Telegram Bot Token
-TELEGRAM_API_TOKEN = "YOUR_TELEGRAM_API_TOKEN"
+# Retrieve Telegram Bot Token
+TELEGRAM_API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
+
+if not TELEGRAM_API_TOKEN:
+    raise ValueError("The TELEGRAM_API_TOKEN environment variable is not set. Please configure it correctly.")
 
 # Vault Goal
 goal_inventory = 1000  # Vault target amount in USD
@@ -94,6 +97,9 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Main Function
 def main():
+    # Debugging: Print token to verify it's being retrieved
+    print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
+
     # Build Application
     app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
