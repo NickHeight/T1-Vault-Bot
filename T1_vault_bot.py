@@ -170,7 +170,7 @@ def start_flask():
     app.run(host="0.0.0.0", port=port)
 
 # Main Function
-def main():
+async def main():
     print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
     app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
@@ -178,7 +178,7 @@ def main():
     app.add_handler(CommandHandler("setauthorized", set_authorized))
 
     print("Bot is running...")
-    asyncio.run(app.run_polling())
+    await app.run_polling()
 
 if __name__ == "__main__":
     # Start Flask in a separate thread
