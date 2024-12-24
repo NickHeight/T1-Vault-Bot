@@ -1,5 +1,6 @@
 import asyncio
 import os
+import requests
 from flask import Flask
 from threading import Thread
 import paypalrestsdk
@@ -34,15 +35,39 @@ BOT_OWNER_ID = 123456789  # Replace with your Telegram user ID
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 
-# Function to Retrieve PayPal Balance
+
 def get_paypal_balance():
     try:
-        balance_response = paypalrestsdk.Balance.retrieve()
-        for currency in balance_response['balances']:
-            if currency['currency_code'] == "USD":
-                return float(currency['total_available'])
+        # Retrieve access token
+        auth_response = requests.post(
+            "https://api.paypal.com/v1/oauth2/token",
+            headers={
+                "Accept": "application/json",
+                "Accept-Language": "en_US",
+            },
+            auth=(os.getenv("PAYPAL_CLIENT_ID"), os.getenv("PAYPAL_SECRET_KEY")),
+            data={"grant_type": "client_credentials"},
+        )
+        auth_response.raise_for_status()
+        access_token = auth_response.json().get("access_token")
+
+        # Retrieve balance
+        balance_response = requests.get(
+            "https://api.paypal.com/v1/reporting/balances",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {access_token}",
+            },
+        )
+        balance_response.raise_for_status()
+
+        # Extract USD balance
+        balances = balance_response.json().get("balances", [])
+        for balance in balances:
+            if balance.get("currency_code") == "USD":
+                return float(balance.get("total_balance", {}).get("value", 0))
         return 0.0
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         print(f"Error retrieving PayPal balance: {e}")
         return 0.0
 
