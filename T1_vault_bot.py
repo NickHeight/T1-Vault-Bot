@@ -1,8 +1,15 @@
+import asyncio
+import os
+from flask import Flask
+from threading import Thread
+
 import paypalrestsdk
 import matplotlib.pyplot as plt
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import os
+
+# Flask app for Render port binding
+app = Flask(__name__)
 
 # PayPal Configuration
 paypalrestsdk.configure({
@@ -104,6 +111,15 @@ async def donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("Error creating payment. Please try again later.")
 
+# Run Flask App for Render Port Binding
+@app.route("/")
+def index():
+    return "T1 Vault Bot is running!"
+
+def start_flask():
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
 # Main Function
 def main():
     print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
@@ -114,13 +130,12 @@ def main():
     app.add_handler(CommandHandler("donate", donate))
 
     print("Bot is running...")
-    app.run_polling()
+    asyncio.run(app.run_polling())
 
 if __name__ == "__main__":
-    # Dummy port binding for Render's web service requirement
-    port = int(os.getenv("PORT", 5000))
-    print(f"Bot is running on port {port}...")
-    main()
+    # Start Flask in a separate thread
+    flask_thread = Thread(target=start_flask)
+    flask_thread.start()
 
-if __name__ == "__main__":
+    # Start Telegram Bot
     main()
