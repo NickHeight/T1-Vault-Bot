@@ -117,4 +117,10 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
+    # Dummy port binding for Render's web service requirement
+    port = int(os.getenv("PORT", 5000))
+    print(f"Bot is running on port {port}...")
+    main()
+
+if __name__ == "__main__":
     main()
