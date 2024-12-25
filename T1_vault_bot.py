@@ -39,7 +39,16 @@ BOT_OWNER_ID = 123456789  # Replace with your Telegram user ID
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 
-# Functions
+# Flask Functions
+@app.route("/")
+def index():
+    return "T1 Vault Bot is running!"
+
+def start_flask():
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+# Telegram Bot Functions
 def get_paypal_balance():
     try:
         auth_response = requests.post(
@@ -65,26 +74,6 @@ def get_paypal_balance():
     except Exception as e:
         print(f"Error retrieving PayPal balance: {e}")
         return 0.0
-
-def generate_progress_bar(current, goal):
-    try:
-        plt.figure(figsize=(8, 2))
-        plt.barh(['Vault Inventory'], [goal], color='gray', label='Goal')
-        plt.barh(['Vault Inventory'], [current], color='green', label='Current Balance')
-        plt.xlim(0, goal)
-        plt.title(f"Vault Progress: ${current:.2f} / ${goal}")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig("vault_inventory_base.png")
-        plt.close()
-
-        base_image = Image.open("vault_inventory_base.png")
-        logo = Image.open("T1_logo.png").resize((100, 100))
-        base_image.paste(logo, (20, 20), logo)
-        base_image.save("vault_inventory.png")
-        os.remove("vault_inventory_base.png")
-    except FileNotFoundError:
-        print("Logo file missing, skipping logo overlay.")
 
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global goal_inventory
@@ -114,26 +103,22 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if username.startswith("@"):
             AUTHORIZED_USERS.add(username.lower())
 
-@app.route("/")
-def index():
-    return "T1 Vault Bot is running!"
-
-def start_flask():
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
+# Main Function
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
-    app.add_handler(CommandHandler("setgoal", set_goal))
-    app.add_handler(CommandHandler("setauthorized", set_authorized))
-    async def start_bot():
-        await app.run_polling()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot_thread = Thread(target=lambda: loop.run_until_complete(start_bot()))
-    bot_thread.start()
+    print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
 
-if __name__ == "__main__":
+    # Start Flask in a separate thread
     flask_thread = Thread(target=start_flask)
     flask_thread.start()
+
+    # Create the Telegram bot application
+    app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
+
+    app.add_handler(CommandHandler("setgoal", set_goal))
+    app.add_handler(CommandHandler("setauthorized", set_authorized))
+
+    print("Bot is running...")
+    app.run_polling()
+
+if __name__ == "__main__":
     main()
