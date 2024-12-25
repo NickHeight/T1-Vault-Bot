@@ -8,7 +8,8 @@ from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes
+    ContextTypes,
+    JobQueue
 )
 import paypalrestsdk
 
@@ -39,23 +40,25 @@ paypalrestsdk.configure({
 # -------------------------
 #  Global Variables
 # -------------------------
-goal_inventory = 1000.0  # Example vault goal
+goal_inventory = 1000.0
 AUTHORIZED_USERS = set()
 BOT_OWNER_ID = 6451807462
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 
-# Render domain (example)
+# Your Render domain
 WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
-# Your PayPal donation link
+# PayPal donation link
 PAYPAL_DONATION_LINK = "https://www.paypal.com/ncp/payment/URH8ZBQYMY9KY"
+
+# We'll store the last-known PayPal balance to detect new donations
+last_balance = 0.0
 
 # -------------------------
 #  Time-based Greeting
 # -------------------------
 def get_eastern_greeting() -> str:
-    import pytz
     eastern = pytz.timezone("US/Eastern")
     now_est = datetime.now(eastern)
     hour = now_est.hour
@@ -68,7 +71,7 @@ def get_eastern_greeting() -> str:
         return "Good evening"
 
 # -------------------------
-#  PayPal Balance
+#  PayPal helpers
 # -------------------------
 def get_paypal_balance() -> float:
     """
@@ -85,7 +88,7 @@ def get_paypal_balance() -> float:
         auth_response.raise_for_status()
         access_token = auth_response.json().get("access_token")
 
-        # Next, get the balance
+        # Next, retrieve the balance
         balance_response = requests.get(
             "https://api.paypal.com/v1/reporting/balances",
             headers={"Authorization": f"Bearer {access_token}"},
@@ -100,6 +103,32 @@ def get_paypal_balance() -> float:
     except Exception as e:
         logging.error(f"Error retrieving PayPal balance: {e}")
         return 0.0
+
+async def check_paypal_donations(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Periodic task to check if the PayPal balance has increased.
+    If it has, we announce a donation in the chat.
+    """
+    global last_balance
+    new_balance = get_paypal_balance()
+    if new_balance > last_balance:
+        diff = new_balance - last_balance
+        # Announce the donation to your chat
+        message = (
+            f"Someone just donated ${diff:.2f} to the vault!\n"
+            f"Vault balance is now: ${new_balance:.2f}"
+        )
+        # If you want to post in a specific thread:
+        await context.bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            message_thread_id=ALLOWED_TOPIC_ID,
+            text=message
+        )
+        last_balance = new_balance
+    else:
+        # Update last_balance even if it decreased or stayed the same,
+        # to avoid repeated announcements
+        last_balance = new_balance
 
 # -------------------------
 #  Telegram Command Handlers
@@ -117,20 +146,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-
 async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Shows the current PayPal-based vault balance, compares to the `goal_inventory`,
     and displays an ASCII progress bar.
     """
-    vault_balance = get_paypal_balance()  # Actual PayPal balance in USD
+    vault_balance = get_paypal_balance()
     progress = 0.0
     if goal_inventory > 0:
         progress = (vault_balance / goal_inventory) * 100
-        # Cap at 100 if it ever goes above the goal
-        progress = min(progress, 100.0)
+        progress = min(progress, 100.0)  # cap at 100 if over goal
 
-    # Build a simple ASCII bar
     bar_length = 20
     filled = int(progress / 100 * bar_length)
     bar_str = "[" + "=" * filled + " " * (bar_length - filled) + "]"
@@ -143,17 +169,13 @@ async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(message)
 
-
 async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Provides a direct link to the PayPal donation page.
-    """
+    """Provide direct link to the PayPal donation page."""
     text = (
         "Thank you for your interest in contributing to the vault!\n"
         f"Please proceed to this donation link: {PAYPAL_DONATION_LINK}"
     )
     await update.message.reply_text(text)
-
 
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global goal_inventory
@@ -171,18 +193,17 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = " ".join(context.args[1:]) if len(context.args) > 1 else None
         await update.message.reply_text(f"Vault goal updated to ${goal_inventory:.2f}.")
 
-        # Announce in a group
+        # Announce in a group/thread
         announcement = f"Gentlemen, the Vault goal has been set to ${goal_inventory:.2f}."
         if reason:
             announcement += f" Reason: {reason}"
         await context.bot.send_message(
             chat_id=ALLOWED_CHAT_ID,
-            message_thread_id=ALLOWED_TOPIC_ID, 
+            message_thread_id=ALLOWED_TOPIC_ID,
             text=announcement
         )
     except ValueError:
         await update.message.reply_text("Invalid amount. Please enter a valid number.")
-
 
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
@@ -207,7 +228,9 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No valid @usernames given.")
 
-
+# -------------------------
+#  Main entry point
+# -------------------------
 def main():
     from telegram.ext import Application
     application = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
@@ -218,6 +241,18 @@ def main():
     application.add_handler(CommandHandler("donate", donate_command))
     application.add_handler(CommandHandler("setgoal", set_goal))
     application.add_handler(CommandHandler("setauthorized", set_authorized))
+
+    # Initialize last_balance
+    global last_balance
+    last_balance = get_paypal_balance()
+
+    # Schedule the donation-check job
+    # Checks every 60 seconds for new PayPal donations
+    application.job_queue.run_repeating(
+        check_paypal_donations, 
+        interval=60,    # poll every 60 seconds
+        first=10        # wait 10s before first run
+    )
 
     # The port that Render provides
     port = int(os.getenv("PORT", "5000"))
@@ -230,7 +265,6 @@ def main():
         url_path=TELEGRAM_API_TOKEN,
         webhook_url=WEBHOOK_URL
     )
-
 
 if __name__ == "__main__":
     main()
