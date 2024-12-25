@@ -1,74 +1,184 @@
-import asyncio
-import json
-import logging
 import os
+import logging
 import requests
+import asyncio
 import pytz
 
-import tornado.ioloop
-import tornado.httpserver
-import tornado.web
-
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
-    ContextTypes
+    ContextTypes,
+    JobQueue
 )
 import paypalrestsdk
 
 logging.basicConfig(level=logging.INFO)
 
-# -------------------------
-#  ENV & PAYPAL CONFIG
-# -------------------------
+# -------------- ENV --------------
 TELEGRAM_API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
 PAYPAL_SECRET_KEY = os.getenv("PAYPAL_SECRET_KEY")
 
 if not TELEGRAM_API_TOKEN:
-    raise ValueError("TELEGRAM_API_TOKEN not set.")
+    raise ValueError("TELEGRAM_API_TOKEN is not set.")
 if not PAYPAL_CLIENT_ID or not PAYPAL_SECRET_KEY:
     raise ValueError("PayPal credentials not set.")
 
+# PayPal config (live or sandbox)
 paypalrestsdk.configure({
-    "mode": "live",  # or "sandbox" if you're testing
+    "mode": "live",  # or "sandbox"
     "client_id": PAYPAL_CLIENT_ID,
     "client_secret": PAYPAL_SECRET_KEY
 })
 
-# -------------------------
-#  GLOBALS
-# -------------------------
+# -------------- GLOBALS --------------
 goal_inventory = 1000.0
 AUTHORIZED_USERS = set()
-BOT_OWNER_ID = 6451807462
+BOT_OWNER_ID = 6451807462  # your personal Telegram user_id
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 
-# Example domain on Render:
-WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 PAYPAL_DONATION_LINK = "https://www.paypal.com/ncp/payment/URH8ZBQYMY9KY"
+known_transaction_ids = set()  # store transaction_ids we've already announced
 
-# -------------------------
-#  TIME-BASED GREETING
-# -------------------------
+# -------------- TIME GREETING --------------
 def get_eastern_greeting() -> str:
-    import pytz
     eastern = pytz.timezone("US/Eastern")
     now_est = datetime.now(eastern)
     hour = now_est.hour
-    if 0 <= hour < 12:
+    if hour < 12:
         return "Good morning"
-    elif 12 <= hour < 17:
+    elif hour < 17:
         return "Good afternoon"
     else:
         return "Good evening"
 
-# -------------------------
-#  TELEGRAM COMMANDS
-# -------------------------
+# -------------- GET PAYPAL BALANCE --------------
+def get_paypal_balance() -> float:
+    """
+    Retrieve the current PayPal balance in USD from /v1/reporting/balances.
+    Returns 0.0 if anything fails.
+    """
+    try:
+        # 1) Get an OAuth2 token
+        auth_resp = requests.post(
+            "https://api.paypal.com/v1/oauth2/token",
+            headers={"Accept": "application/json"},
+            auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET_KEY),
+            data={"grant_type": "client_credentials"},
+        )
+        auth_resp.raise_for_status()
+        access_token = auth_resp.json()["access_token"]
+
+        # 2) Retrieve the balances
+        bal_resp = requests.get(
+            "https://api.paypal.com/v1/reporting/balances",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        bal_resp.raise_for_status()
+        data = bal_resp.json()
+
+        for item in data.get("balances", []):
+            if item.get("currency_code") == "USD":
+                return float(item["total_balance"]["value"])
+        return 0.0
+    except Exception as e:
+        logging.error(f"Error retrieving PayPal balance: {e}")
+        return 0.0
+
+# -------------- GET TRANSACTIONS --------------
+def get_recent_paypal_transactions() -> list:
+    """
+    Calls /v1/reporting/transactions to get a list of recent transactions.
+    We'll check the last 24h as an example. Adjust as you prefer.
+    Each transaction might include 'transaction_id', 'transaction_info', etc.
+    """
+    try:
+        # 1) OAuth2 token
+        auth_resp = requests.post(
+            "https://api.paypal.com/v1/oauth2/token",
+            headers={"Accept": "application/json"},
+            auth=(PAYPAL_CLIENT_ID, PAYPAL_SECRET_KEY),
+            data={"grant_type": "client_credentials"},
+        )
+        auth_resp.raise_for_status()
+        access_token = auth_resp.json()["access_token"]
+
+        # 2) Build date range: last 1 day
+        end_date = datetime.now().astimezone()
+        start_date = end_date - timedelta(days=1)
+        # Format: "YYYY-MM-DDTHH:MM:SS-0700"
+        # We'll assume local offset or UTC offset
+        start_str = start_date.isoformat()
+        end_str = end_date.isoformat()
+
+        # 3) GET transaction search
+        url = "https://api.paypal.com/v1/reporting/transactions"
+        params = {
+            "start_date": start_str,
+            "end_date": end_str,
+            "fields": "all",
+            "page_size": 50
+        }
+        tx_resp = requests.get(
+            url, params=params,
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        tx_resp.raise_for_status()
+        data = tx_resp.json()
+
+        # "transaction_details" is typically an array of transactions
+        return data.get("transaction_details", [])
+    except Exception as e:
+        logging.error(f"Error retrieving recent PayPal transactions: {e}")
+        return []
+
+# -------------- JOB: POLL DONATIONS --------------
+async def poll_paypal_donations(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Periodically called. Fetches recent transactions from PayPal,
+    checks if there's a new one we haven't announced, and announces it.
+    """
+    global known_transaction_ids
+
+    transactions = get_recent_paypal_transactions()
+    for item in transactions:
+        tx_info = item.get("transaction_info", {})
+        transaction_id = tx_info.get("transaction_id")
+        if not transaction_id or transaction_id in known_transaction_ids:
+            continue  # skip if we already saw it
+
+        # Mark this transaction as known
+        known_transaction_ids.add(transaction_id)
+
+        # If this is an inbound (credit) transaction
+        # PayPal docs: "transaction_info.transaction_amount.value" is the amount
+        # "transaction_info.transaction_initiation_date" is the date
+        # "payer_info.email_address" or "payer_info.payer_name.alternative_full_name" might exist
+        transaction_amount = tx_info.get("transaction_amount", {}).get("value", "0.00")
+        # This might be negative if it's money out, so check
+        if tx_info.get("transaction_event_code", "").startswith("T00"):
+            # or check if "transaction_amount.value" is > 0
+            # Attempt to find donor name
+            payer_info = item.get("payer_info", {})
+            name = payer_info.get("payer_name", {}).get("alternate_full_name") or payer_info.get("email_address") or "someone"
+
+            # Announce in Telegram
+            message = (
+                f"**Donation Received**\n"
+                f"{name} donated ${transaction_amount} to the vault.\n"
+                "Thank you! 🎉"
+            )
+            await context.bot.send_message(
+                chat_id=ALLOWED_CHAT_ID,
+                message_thread_id=ALLOWED_TOPIC_ID,
+                text=message,
+                parse_mode="Markdown"
+            )
+
+# -------------- TELEGRAM HANDLERS --------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     greeting = get_eastern_greeting()
     text = (
@@ -78,20 +188,30 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text)
 
-
 async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the current 'goal_inventory' or a PayPal-based balance if preferred."""
-    await update.message.reply_text(f"Current vault inventory is ${goal_inventory:.2f}.")
+    # Show current PayPal-based vault balance
+    vault_balance = get_paypal_balance()
+    # Optionally build an ASCII bar
+    progress = (vault_balance / goal_inventory) * 100 if goal_inventory > 0 else 0
+    progress = min(progress, 100.0)
+    bar_length = 20
+    filled = int(progress / 100 * bar_length)
+    bar_str = "[" + "=" * filled + " " * (bar_length - filled) + "]"
 
+    text = (
+        f"Vault balance: ${vault_balance:.2f}\n"
+        f"Goal: ${goal_inventory:.2f}\n"
+        f"Progress: {bar_str} {progress:.1f}%\n\n"
+        f"Donate here: {PAYPAL_DONATION_LINK}"
+    )
+    await update.message.reply_text(text)
 
 async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Provide a link to PayPal donation page."""
     text = (
         "Thank you for your interest in contributing to the vault!\n"
         f"Please visit: {PAYPAL_DONATION_LINK}"
     )
     await update.message.reply_text(text)
-
 
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global goal_inventory
@@ -111,7 +231,6 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = " ".join(context.args[1:]) if len(context.args) > 1 else None
         await update.message.reply_text(f"Vault goal updated to ${goal_inventory:.2f}.")
 
-        # Announce to your group/thread
         announcement = f"Gentlemen, the Vault goal is now ${goal_inventory:.2f}."
         if reason:
             announcement += f" Reason: {reason}"
@@ -122,7 +241,6 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except ValueError:
         await update.message.reply_text("Invalid amount. Please enter a valid number.")
-
 
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
@@ -145,128 +263,24 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No valid @usernames found.")
 
-
-# -------------------------
-#  TORNADO HANDLERS
-# -------------------------
-class TelegramWebhookHandler(tornado.web.RequestHandler):
-    """
-    Handle Telegram updates at POST /<TELEGRAM_API_TOKEN>.
-    We feed them into PTB's application.update_queue.
-    """
-    def initialize(self, ptb_application):
-        self.ptb_app = ptb_application
-
-    async def post(self):
-        try:
-            data = json.loads(self.request.body)
-        except json.JSONDecodeError:
-            self.set_status(400)
-            self.finish("Invalid JSON")
-            return
-
-        update = Update.de_json(data, self.ptb_app.bot)
-        self.ptb_app.update_queue.put_nowait(update)
-
-        self.set_status(200)
-        self.finish("OK")
-
-
-class PayPalWebhookHandler(tornado.web.RequestHandler):
-    """
-    Handle PayPal events at POST /paypal-webhook.
-    In production, verify signatures from PayPal to ensure authenticity.
-    """
-    def initialize(self, ptb_application):
-        self.ptb_app = ptb_application
-
-    async def post(self):
-        try:
-            data = json.loads(self.request.body)
-        except json.JSONDecodeError:
-            logging.error("PayPal webhook: Invalid JSON")
-            self.set_status(400)
-            self.finish("Invalid JSON")
-            return
-
-        event_type = data.get("event_type")
-        resource = data.get("resource", {})
-
-        if event_type == "PAYMENT.SALE.COMPLETED":
-            amount = resource.get("amount", {}).get("total", "0.00")
-            payer_info = resource.get("payer", {}).get("payer_info", {})
-            first_name = payer_info.get("first_name", "").strip() or "someone"
-
-            text = (
-                f"**Donation Received**\n"
-                f"{first_name} donated ${amount} to the vault.\n"
-                "Thank you! 🎉"
-            )
-            # Post in your group/thread
-            await self.ptb_app.bot.send_message(
-                chat_id=ALLOWED_CHAT_ID,
-                message_thread_id=ALLOWED_TOPIC_ID,
-                text=text,
-                parse_mode="Markdown"
-            )
-
-        self.set_status(200)
-        self.finish("OK")
-
-
-# -------------------------
-#  MAIN ASYNC SETUP
-# -------------------------
-async def run_bot_and_server():
-    """
-    1) Build & start PTB (manually).
-    2) Set Telegram webhook to /<BOT_TOKEN>.
-    3) Create Tornado routes for Telegram + PayPal.
-    4) Listen on Render's PORT.
-    5) Keep code alive with a 'while True' instead of stopping or shutting down.
-    """
-    # 1) Build the PTB application
-    ptb_app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
-
-    # Add commands
-    ptb_app.add_handler(CommandHandler("start", start_command))
-    ptb_app.add_handler(CommandHandler("vault", vault_command))
-    ptb_app.add_handler(CommandHandler("donate", donate_command))
-    ptb_app.add_handler(CommandHandler("setgoal", set_goal))
-    ptb_app.add_handler(CommandHandler("setauthorized", set_authorized))
-
-    # Start PTB
-    await ptb_app.initialize()
-    await ptb_app.start()
-    logging.info("PTB Application started.")
-
-    # 2) Tell Telegram to send updates to this route
-    await ptb_app.bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Set Telegram webhook to {WEBHOOK_URL}")
-
-    # 3) Tornado web app with two routes
-    telegram_path = f"/{TELEGRAM_API_TOKEN}"
-    tornado_app = tornado.web.Application([
-        (telegram_path, TelegramWebhookHandler, dict(ptb_application=ptb_app)),
-        (r"/paypal-webhook", PayPalWebhookHandler, dict(ptb_application=ptb_app)),
-    ])
-
-    # 4) Listen on Render's PORT
-    port = int(os.getenv("PORT", "5000"))
-    server = tornado.httpserver.HTTPServer(tornado_app)
-    server.listen(port)
-    logging.info(f"Tornado server listening on port {port}...")
-
-    # 5) Keep this function alive so everything keeps running
-    while True:
-        await asyncio.sleep(3600)  # Sleep "forever"
-
-
+# -------------- MAIN --------------
 def main():
-    # We do NOT call tornado.ioloop.IOLoop.current().start().
-    # Instead, we let 'while True: await asyncio.sleep()' block inside the same event loop.
-    asyncio.run(run_bot_and_server())
+    application = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
+    # Register commands
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("vault", vault_command))
+    application.add_handler(CommandHandler("donate", donate_command))
+    application.add_handler(CommandHandler("setgoal", set_goal))
+    application.add_handler(CommandHandler("setauthorized", set_authorized))
+
+    # Schedule the donation poll job
+    # Runs every 60s. Adjust as desired. 
+    job_queue = application.job_queue
+    job_queue.run_repeating(poll_paypal_donations, interval=60, first=10)
+
+    # Start polling Telegram for updates
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
