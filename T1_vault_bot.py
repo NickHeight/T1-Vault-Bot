@@ -132,6 +132,7 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if new_users:
         await update.message.reply_text(f"Authorized users updated: {', '.join(new_users)}")
+
 # Main Function
 def main():
     print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
