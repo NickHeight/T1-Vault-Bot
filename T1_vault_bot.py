@@ -23,38 +23,40 @@ if not PAYPAL_CLIENT_ID or not PAYPAL_SECRET_KEY:
 
 # PayPal Configuration
 paypalrestsdk.configure({
-    "mode": "live",  # Change to "sandbox" for testing
+    "mode": "live",
     "client_id": PAYPAL_CLIENT_ID,
     "client_secret": PAYPAL_SECRET_KEY
 })
 
-# Vault Goal and Authorized Users
-goal_inventory = 1000  # Vault target amount in USD
+# Global Variables
+goal_inventory = 1000
 AUTHORIZED_USERS = set()
-BOT_OWNER_ID = 6451807462  # Replace with your Telegram user ID
-
-# Allowed Topic and Chat IDs
+BOT_OWNER_ID = 6451807462
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
+WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
-# Flask Functions
+bot_app = None  # Initialize later
+
+
 @app.route("/")
 def index():
     return "T1 Vault Bot is running!"
 
+
 @app.route(f"/{TELEGRAM_API_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    """Handle incoming Telegram webhook requests."""
+    global bot_app
     update = Update.de_json(request.get_json(), bot_app.bot)
     bot_app.update_queue.put_nowait(update)
     return "OK", 200
 
+
 def start_flask():
-    """Start the Flask app."""
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
-# Telegram Bot Functions
+
 def get_paypal_balance():
     try:
         auth_response = requests.post(
@@ -81,6 +83,7 @@ def get_paypal_balance():
         print(f"Error retrieving PayPal balance: {e}")
         return 0.0
 
+
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global goal_inventory
     username = f"@{update.effective_user.username}".lower() if update.effective_user.username else None
@@ -99,6 +102,7 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid amount. Please enter a number.")
 
+
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
 
@@ -108,36 +112,19 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text("Please specify at least one username. Example: /setauthorized @ceozorro @Lord_Malachai")
+        await update.message.reply_text("Please specify at least one username. Example: /setauthorized @username")
         return
 
     new_users = []
     for username in context.args:
         if username.startswith("@"):
             username_lower = username.lower()
-            if username_lower not in AUTHORIZED_USERS:
-                AUTHORIZED_USERS.add(username_lower)
-                new_users.append(username_lower)
-
-                try:
-                    user = await context.bot.get_chat(username)
-                    await context.bot.send_message(
-                        chat_id=user.id,
-                        text="You are now an Authorized User. You can now manage the T1 Vault Bot!"
-                    )
-                except Exception as e:
-                    print(f"Failed to notify {username}: {e}")
-            else:
-                await update.message.reply_text(f"{username} is already an authorized user.")
-        else:
-            await update.message.reply_text(f"Invalid username format: {username}. Use '@' before usernames.")
-            return
+            AUTHORIZED_USERS.add(username_lower)
+            new_users.append(username_lower)
 
     if new_users:
         await update.message.reply_text(f"Authorized users updated: {', '.join(new_users)}")
 
-# Main Function
-WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
 def main():
     global bot_app
@@ -157,6 +144,7 @@ def main():
         url_path=TELEGRAM_API_TOKEN,
         webhook_url=WEBHOOK_URL
     )
+
 
 if __name__ == "__main__":
     main()
