@@ -4,7 +4,7 @@ import requests
 from flask import Flask, request
 from threading import Thread
 import paypalrestsdk
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Flask app for Render port binding
@@ -36,28 +36,24 @@ ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
-bot_app = None  # Initialize later
-
+# Instantiate the Bot and the Application (no .run_webhook!)
+bot = Bot(token=TELEGRAM_API_TOKEN)
+appbuilder = ApplicationBuilder().token(TELEGRAM_API_TOKEN)
+bot_app = appbuilder.build()
 
 @app.route("/")
 def index():
     return "T1 Vault Bot is running!"
 
-
 @app.route(f"/{TELEGRAM_API_TOKEN}", methods=["POST"])
 def telegram_webhook():
-    global bot_app
-    update = Update.de_json(request.get_json(), bot_app.bot)
+    """Receive updates from Telegram via Flask."""
+    update = Update.de_json(request.get_json(force=True), bot)
     bot_app.update_queue.put_nowait(update)
     return "OK", 200
 
-
-def start_flask():
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-
 def get_paypal_balance():
+    """Example helper for PayPal calls."""
     try:
         auth_response = requests.post(
             "https://api.paypal.com/v1/oauth2/token",
@@ -83,7 +79,6 @@ def get_paypal_balance():
         print(f"Error retrieving PayPal balance: {e}")
         return 0.0
 
-
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global goal_inventory
     username = f"@{update.effective_user.username}".lower() if update.effective_user.username else None
@@ -102,10 +97,8 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid amount. Please enter a number.")
 
-
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
-
     user_id = update.effective_user.id
     if user_id != BOT_OWNER_ID:
         await update.message.reply_text("Only the bot owner can set authorized users.")
@@ -125,26 +118,17 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if new_users:
         await update.message.reply_text(f"Authorized users updated: {', '.join(new_users)}")
 
-
 def main():
-    global bot_app
-    print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
-
-    flask_thread = Thread(target=start_flask)
-    flask_thread.start()
-
-    bot_app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
-
+    # Register handlers
     bot_app.add_handler(CommandHandler("setgoal", set_goal))
     bot_app.add_handler(CommandHandler("setauthorized", set_authorized))
 
-    bot_app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 5000)),
-        url_path=TELEGRAM_API_TOKEN,
-        webhook_url=WEBHOOK_URL
-    )
+    # Important: Set webhook once so Telegram knows where to send updates
+    bot.set_webhook(url=WEBHOOK_URL)
 
+    # Finally, run Flask on Render’s assigned port
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     main()
