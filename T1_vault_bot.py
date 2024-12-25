@@ -187,4 +187,4 @@ if __name__ == "__main__":
     flask_thread.start()
 
     # Start Telegram Bot
-    main()
+    asyncio.run(main())
