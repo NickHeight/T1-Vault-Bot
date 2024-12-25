@@ -2,8 +2,8 @@ import asyncio
 import json
 import logging
 import os
-import pytz
 import requests
+import pytz
 import tornado.ioloop
 import tornado.httpserver
 import tornado.web
@@ -46,16 +46,14 @@ BOT_OWNER_ID = 6451807462
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 
-# For Telegram webhook
-# Example: https://your-service.onrender.com/<TELEGRAM_API_TOKEN>
+# Example Render domain. Adjust if yours is different:
 WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
-# PayPal donation link (optional command)
+# PayPal donation link
 PAYPAL_DONATION_LINK = "https://www.paypal.com/ncp/payment/URH8ZBQYMY9KY"
 
-
 # -------------------------
-#  TIME GREETING
+#  TIME-BASED GREETING
 # -------------------------
 def get_eastern_greeting() -> str:
     eastern = pytz.timezone("US/Eastern")
@@ -69,9 +67,9 @@ def get_eastern_greeting() -> str:
         return "Good evening"
 
 
-# -------------------------
-#  TELEGRAM COMMANDS
-# -------------------------
+# ----------------------------------------------------------------------
+# TELEGRAM COMMAND HANDLERS
+# ----------------------------------------------------------------------
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     greeting = get_eastern_greeting()
     text = (
@@ -82,11 +80,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 async def vault_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"Current vault inventory is ${goal_inventory:.2f}."
-    )
+    """
+    Show the vault's current 'goal_inventory' or do a PayPal call if you prefer.
+    """
+    await update.message.reply_text(f"Current vault inventory is ${goal_inventory:.2f}.")
 
 async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Provide a link for PayPal donations.
+    """
     text = (
         "Thank you for your interest in contributing to the vault!\n"
         f"Please visit: {PAYPAL_DONATION_LINK}"
@@ -109,9 +111,9 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = float(context.args[0])
         goal_inventory = amount
         reason = " ".join(context.args[1:]) if len(context.args) > 1 else None
-
         await update.message.reply_text(f"Vault goal updated to ${goal_inventory:.2f}.")
 
+        # Announce in a specific chat/thread
         announcement = f"Gentlemen, the Vault goal is now ${goal_inventory:.2f}."
         if reason:
             announcement += f" Reason: {reason}"
@@ -145,18 +147,47 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No valid @usernames found.")
 
 
-# -------------------------
-#  PAYPAL WEBHOOK HANDLER
-# -------------------------
-class PayPalWebhookHandler(tornado.web.RequestHandler):
+# ----------------------------------------------------------------------
+# TORNADO HANDLER FOR TELEGRAM WEBHOOK
+# ----------------------------------------------------------------------
+class TelegramWebhookHandler(tornado.web.RequestHandler):
     """
-    Tornado handler for PayPal events at /paypal-webhook.
-    In production: verify signature to ensure the request is really from PayPal!
+    Handles POST requests from Telegram at /<TELEGRAM_API_TOKEN>.
+    We'll parse the JSON -> telegram.Update -> put into PTB's update_queue.
     """
 
-    def initialize(self, telegram_app):
-        # We'll store a reference to the PTB Application so we can call bot.send_message
-        self.telegram_app = telegram_app
+    def initialize(self, ptb_application):
+        self.application_ptb = ptb_application  # The PTB Application
+
+    async def post(self):
+        try:
+            data = json.loads(self.request.body)
+        except json.JSONDecodeError:
+            self.set_status(400)
+            self.finish("Invalid JSON")
+            return
+
+        # Parse update
+        update = Update.de_json(data, self.application_ptb.bot)
+
+        # Send to PTB for processing
+        self.application_ptb.update_queue.put_nowait(update)
+
+        self.set_status(200)
+        self.finish("OK")
+
+
+# ----------------------------------------------------------------------
+# TORNADO HANDLER FOR PAYPAL WEBHOOK
+# ----------------------------------------------------------------------
+class PayPalWebhookHandler(tornado.web.RequestHandler):
+    """
+    For PayPal to POST donation events at /paypal-webhook.
+    In production, verify signature to ensure authenticity!
+    """
+
+    def initialize(self, ptb_application):
+        self.application_ptb = ptb_application
 
     async def post(self):
         try:
@@ -170,7 +201,6 @@ class PayPalWebhookHandler(tornado.web.RequestHandler):
         event_type = data.get("event_type")
         resource = data.get("resource", {})
 
-        # For example, handle 'PAYMENT.SALE.COMPLETED'
         if event_type == "PAYMENT.SALE.COMPLETED":
             amount = resource.get("amount", {}).get("total", "0.00")
             payer_info = resource.get("payer", {}).get("payer_info", {})
@@ -181,8 +211,8 @@ class PayPalWebhookHandler(tornado.web.RequestHandler):
                 f"{first_name} donated ${amount} to the vault.\n"
                 "Thank you! 🎉"
             )
-            # Announce in your chat
-            await self.telegram_app.bot.send_message(
+            # Announce in your Telegram group/thread
+            await self.application_ptb.bot.send_message(
                 chat_id=ALLOWED_CHAT_ID,
                 message_thread_id=ALLOWED_TOPIC_ID,
                 text=text,
@@ -193,60 +223,57 @@ class PayPalWebhookHandler(tornado.web.RequestHandler):
         self.finish("OK")
 
 
-# -------------------------
-#  ASYNC SETUP & MAIN
-# -------------------------
+# ----------------------------------------------------------------------
+# MAIN ASYNC FUNCTION
+# ----------------------------------------------------------------------
 async def run_bot_and_server():
     """
     1) Build the PTB Application (no run_webhook).
-    2) Build a Tornado server with 2 routes:
-       - /<TELEGRAM_API_TOKEN>  -> PTB's webhook handler
-       - /paypal-webhook        -> our PayPalWebhookHandler
-    3) Initialize & start the PTB app, set the Telegram webhook,
-       then start Tornado's IO loop (forever).
+    2) Initialize + start PTB so it processes updates.
+    3) Set the Telegram webhook to /<TELEGRAM_BOT_TOKEN>.
+    4) Create Tornado routes for Telegram + PayPal.
+    5) Start Tornado's IOLoop. 
     """
 
-    # 1) PTB Application
-    application = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
+    # 1) PTB app
+    ptb_app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
     # Register commands
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("vault", vault_command))
-    application.add_handler(CommandHandler("donate", donate_command))
-    application.add_handler(CommandHandler("setgoal", set_goal))
-    application.add_handler(CommandHandler("setauthorized", set_authorized))
+    ptb_app.add_handler(CommandHandler("start", start_command))
+    ptb_app.add_handler(CommandHandler("vault", vault_command))
+    ptb_app.add_handler(CommandHandler("donate", donate_command))
+    ptb_app.add_handler(CommandHandler("setgoal", set_goal))
+    ptb_app.add_handler(CommandHandler("setauthorized", set_authorized))
 
-    # 2) Build the Tornado web app
-    #   - We ask PTB for a tornado RequestHandler that handles Telegram updates at /<bot_token>
-    telegram_handler_class = application.create_webhook_handler()
+    # 2) Initialize + start PTB
+    await ptb_app.initialize()
+    await ptb_app.start()
 
+    # 3) Set Telegram's webhook so updates come to /<TELEGRAM_API_TOKEN>
+    await ptb_app.bot.set_webhook(WEBHOOK_URL)
+
+    # 4) Build Tornado with 2 routes
+    #    - /<TELEGRAM_BOT_TOKEN> -> TelegramWebhookHandler
+    #    - /paypal-webhook      -> PayPalWebhookHandler
+    telegram_path = f"/{TELEGRAM_API_TOKEN}"
     tornado_app = tornado.web.Application([
-        (fr"/{TELEGRAM_API_TOKEN}", telegram_handler_class),
-        (r"/paypal-webhook", PayPalWebhookHandler, dict(telegram_app=application)),
+        (telegram_path, TelegramWebhookHandler, dict(ptb_application=ptb_app)),
+        (r"/paypal-webhook", PayPalWebhookHandler, dict(ptb_application=ptb_app)),
     ])
 
-    # 3) Initialize & start the PTB application
-    await application.initialize()
-    await application.start()
-
-    # Set Telegram’s webhook so it knows to POST updates to /<TELEGRAM_API_TOKEN>
-    await application.bot.set_webhook(WEBHOOK_URL)
-
-    # 4) Start the Tornado server on your Render-assigned port
     port = int(os.getenv("PORT", "5000"))
     server = tornado.httpserver.HTTPServer(tornado_app)
     server.bind(port)
-    server.start(1)  # 1 process; you could use 0 to autodetect CPU
+    server.start(1)  # 1 process
+    logging.info(f"Bot & Tornado server listening on port {port}...")
 
-    logging.info(f"Bot + Tornado server started on port {port}. Now entering IOLoop...")
-
-    # Keep running forever
+    # 5) Start the IOLoop forever
     try:
         tornado.ioloop.IOLoop.current().start()
     finally:
         logging.info("Shutting down PTB application...")
-        await application.shutdown()
-        await application.stop()
+        await ptb_app.shutdown()
+        await ptb_app.stop()
 
 
 def main():
