@@ -1,11 +1,9 @@
 import asyncio
 import os
 import requests
-from flask import Flask
+from flask import Flask, request
 from threading import Thread
 import paypalrestsdk
-import matplotlib.pyplot as plt
-from PIL import Image
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
@@ -44,7 +42,15 @@ ALLOWED_CHAT_ID = -1002387080797
 def index():
     return "T1 Vault Bot is running!"
 
+@app.route(f"/{TELEGRAM_API_TOKEN}", methods=["POST"])
+def telegram_webhook():
+    """Handle incoming Telegram webhook requests."""
+    update = Update.de_json(request.get_json(), bot_app.bot)
+    bot_app.update_queue.put_nowait(update)
+    return "OK", 200
+
 def start_flask():
+    """Start the Flask app."""
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
@@ -96,13 +102,11 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
 
-    # Check if the user is the bot owner
     user_id = update.effective_user.id
     if user_id != BOT_OWNER_ID:
         await update.message.reply_text("Only the bot owner can set authorized users.")
         return
 
-    # Parse arguments
     if len(context.args) < 1:
         await update.message.reply_text("Please specify at least one username. Example: /setauthorized @ceozorro @Lord_Malachai")
         return
@@ -110,12 +114,11 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_users = []
     for username in context.args:
         if username.startswith("@"):
-            username_lower = username.lower()  # Convert to lowercase for consistency
+            username_lower = username.lower()
             if username_lower not in AUTHORIZED_USERS:
                 AUTHORIZED_USERS.add(username_lower)
                 new_users.append(username_lower)
 
-                # Notify the newly authorized user
                 try:
                     user = await context.bot.get_chat(username)
                     await context.bot.send_message(
@@ -134,49 +137,26 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Authorized users updated: {', '.join(new_users)}")
 
 # Main Function
+WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
+
 def main():
+    global bot_app
     print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
 
-    # Start Flask in a separate thread
     flask_thread = Thread(target=start_flask)
     flask_thread.start()
 
-    # Create the Telegram bot application
-    app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
-
-    app.add_handler(CommandHandler("setgoal", set_goal))
-    app.add_handler(CommandHandler("setauthorized", set_authorized))
-
-    print("Bot is running...")
-    # Webhook URL
-WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"  # Replace with your Render app URL
-
-# Main Function
-def main():
-    print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
-
-    # Start Flask in a separate thread
-    flask_thread = Thread(target=start_flask)
-    flask_thread.start()
-
-    # Create the Telegram bot application
     bot_app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
-    # Add handlers
     bot_app.add_handler(CommandHandler("setgoal", set_goal))
     bot_app.add_handler(CommandHandler("setauthorized", set_authorized))
 
-    # Set webhook
     bot_app.run_webhook(
         listen="0.0.0.0",
         port=int(os.getenv("PORT", 5000)),
         url_path=TELEGRAM_API_TOKEN,
         webhook_url=WEBHOOK_URL
     )
-
-if __name__ == "__main__":
-    main()
-
 
 if __name__ == "__main__":
     main()
