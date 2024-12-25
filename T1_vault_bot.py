@@ -2,7 +2,9 @@ import os
 import logging
 import requests
 import paypalrestsdk
+import pytz
 
+from datetime import datetime
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,14 +20,14 @@ PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID")
 PAYPAL_SECRET_KEY = os.getenv("PAYPAL_SECRET_KEY")
 
 if not TELEGRAM_API_TOKEN:
-    raise ValueError("The TELEGRAM_API_TOKEN environment variable is not set.")
+    raise ValueError("TELEGRAM_API_TOKEN environment variable is not set.")
 
 if not PAYPAL_CLIENT_ID or not PAYPAL_SECRET_KEY:
     raise ValueError("PayPal API credentials are not set.")
 
 # -- PayPal config --
 paypalrestsdk.configure({
-    "mode": "live",  # or 'sandbox'
+    "mode": "live",
     "client_id": PAYPAL_CLIENT_ID,
     "client_secret": PAYPAL_SECRET_KEY
 })
@@ -37,10 +39,29 @@ BOT_OWNER_ID = 6451807462
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
 
-# Example: your Render URL is https://t1-vault-bot.onrender.com
+# Example Render domain:
 WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
-# Optional helper to get the PayPal balance:
+# ----------------------------------------------------------------------
+# Time-of-day greeting in Eastern Time
+# ----------------------------------------------------------------------
+def get_eastern_greeting() -> str:
+    """Return "Good morning/afternoon/evening" based on Eastern Time."""
+    eastern = pytz.timezone("US/Eastern")
+    now_est = datetime.now(eastern)
+    hour = now_est.hour
+    
+    if 0 <= hour < 12:
+        return "Good morning"
+    elif 12 <= hour < 17:
+        return "Good afternoon"
+    else:
+        return "Good evening"
+
+
+# ----------------------------------------------------------------------
+# Example helper to retrieve PayPal balance
+# ----------------------------------------------------------------------
 def get_paypal_balance() -> float:
     try:
         auth_response = requests.post(
@@ -67,9 +88,21 @@ def get_paypal_balance() -> float:
         logging.error(f"Error retrieving PayPal balance: {e}")
         return 0.0
 
-# -------------------------
+
+# ----------------------------------------------------------------------
 # Telegram Command Handlers
-# -------------------------
+# ----------------------------------------------------------------------
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Greet user with time-of-day aware message in Eastern Time."""
+    greeting = get_eastern_greeting()
+    text = (
+        f"{greeting} sir! As the T1 Vault Bot, I am at your service.\n"
+        "Say /vault to see the current vault inventory.\n"
+        "Say /donate to contribute to the vault."
+    )
+    await update.message.reply_text(text)
+
+
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global goal_inventory
     username = f"@{update.effective_user.username}".lower() if update.effective_user.username else None
@@ -98,13 +131,14 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("Invalid amount. Please enter a valid number.")
 
+
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
     if update.effective_user.id != BOT_OWNER_ID:
         await update.message.reply_text("Only the bot owner can set authorized users.")
         return
     if not context.args:
-        await update.message.reply_text("Usage: /setauthorized @user1 @user2 ...")
+        await update.message.reply_text("Usage: /setauthorized @username")
         return
     
     new_users = []
@@ -121,27 +155,30 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("No valid @usernames given.")
 
-# -------------------------
-# Main entry point
-# -------------------------
+
+# ----------------------------------------------------------------------
+# Main entry point (no Flask, using PTB's built-in web server)
+# ----------------------------------------------------------------------
 def main():
     # Create the Telegram Application
     application = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
     # Register command handlers
+    application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("setgoal", set_goal))
     application.add_handler(CommandHandler("setauthorized", set_authorized))
 
-    # Render uses the PORT environment variable
+    # The port Render gives you
     port = int(os.getenv("PORT", "5000"))
 
     logging.info("Starting T1 Vault Bot in webhook mode...")
     application.run_webhook(
-        listen="0.0.0.0",             # Bind to all interfaces
-        port=port,                   # The port that Render provides
-        url_path=TELEGRAM_API_TOKEN, # Path part of the webhook
-        webhook_url=WEBHOOK_URL      # Full URL for Telegram to call
+        listen="0.0.0.0",
+        port=port,
+        url_path=TELEGRAM_API_TOKEN,
+        webhook_url=WEBHOOK_URL
     )
+
 
 if __name__ == "__main__":
     main()
