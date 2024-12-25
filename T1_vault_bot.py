@@ -95,14 +95,43 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global AUTHORIZED_USERS
+
+    # Check if the user is the bot owner
     user_id = update.effective_user.id
     if user_id != BOT_OWNER_ID:
         await update.message.reply_text("Only the bot owner can set authorized users.")
         return
+
+    # Parse arguments
+    if len(context.args) < 1:
+        await update.message.reply_text("Please specify at least one username. Example: /setauthorized @ceozorro @Lord_Malachai")
+        return
+
+    new_users = []
     for username in context.args:
         if username.startswith("@"):
-            AUTHORIZED_USERS.add(username.lower())
+            username_lower = username.lower()  # Convert to lowercase for consistency
+            if username_lower not in AUTHORIZED_USERS:
+                AUTHORIZED_USERS.add(username_lower)
+                new_users.append(username_lower)
 
+                # Notify the newly authorized user
+                try:
+                    user = await context.bot.get_chat(username)
+                    await context.bot.send_message(
+                        chat_id=user.id,
+                        text="You are now an Authorized User. You can now manage the T1 Vault Bot!"
+                    )
+                except Exception as e:
+                    print(f"Failed to notify {username}: {e}")
+            else:
+                await update.message.reply_text(f"{username} is already an authorized user.")
+        else:
+            await update.message.reply_text(f"Invalid username format: {username}. Use '@' before usernames.")
+            return
+
+    if new_users:
+        await update.message.reply_text(f"Authorized users updated: {', '.join(new_users)}")
 # Main Function
 def main():
     print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
