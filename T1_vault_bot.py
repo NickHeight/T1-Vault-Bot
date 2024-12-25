@@ -123,10 +123,14 @@ def main():
     bot_app.add_handler(CommandHandler("setgoal", set_goal))
     bot_app.add_handler(CommandHandler("setauthorized", set_authorized))
 
-    # Important: Set webhook once so Telegram knows where to send updates
-    bot.set_webhook(url=WEBHOOK_URL)
+    # Fix: Wrap the async call in a function and await it properly
+    async def init_webhook():
+        await bot.set_webhook(url=WEBHOOK_URL)
 
-    # Finally, run Flask on Render’s assigned port
+    # Now call it here
+    asyncio.run(init_webhook())
+
+    # Then run Flask on Render’s assigned port
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
