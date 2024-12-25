@@ -1,14 +1,14 @@
 import asyncio
 import os
 import requests
-from flask import Flask, request
-from threading import Thread
 import paypalrestsdk
-from telegram import Update, Bot
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# Flask app for Render port binding
-app = Flask(__name__)
+from telegram import Update, Bot
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
+)
 
 # Environment Variables
 TELEGRAM_API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
@@ -34,25 +34,11 @@ AUTHORIZED_USERS = set()
 BOT_OWNER_ID = 6451807462
 ALLOWED_TOPIC_ID = 4437
 ALLOWED_CHAT_ID = -1002387080797
+
+# Adjust to your Render URL + token path
 WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"
 
-# Instantiate the Bot and the Application (no .run_webhook!)
-bot = Bot(token=TELEGRAM_API_TOKEN)
-appbuilder = ApplicationBuilder().token(TELEGRAM_API_TOKEN)
-bot_app = appbuilder.build()
-
-@app.route("/")
-def index():
-    return "T1 Vault Bot is running!"
-
-@app.route(f"/{TELEGRAM_API_TOKEN}", methods=["POST"])
-def telegram_webhook():
-    """Receive updates from Telegram via Flask."""
-    update = Update.de_json(request.get_json(force=True), bot)
-    bot_app.update_queue.put_nowait(update)
-    return "OK", 200
-
-def get_paypal_balance():
+def get_paypal_balance() -> float:
     """Example helper for PayPal calls."""
     try:
         auth_response = requests.post(
@@ -80,6 +66,7 @@ def get_paypal_balance():
         return 0.0
 
 async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /setgoal command."""
     global goal_inventory
     username = f"@{update.effective_user.username}".lower() if update.effective_user.username else None
     if username not in AUTHORIZED_USERS:
@@ -89,21 +76,26 @@ async def set_goal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         goal_inventory = float(context.args[0])
         reason = " ".join(context.args[1:]) if len(context.args) > 1 else None
         await update.message.reply_text(f"Vault goal updated to ${goal_inventory:.2f}.")
-        bot = context.bot
+        
+        # Announce to chat
         announcement = f"Gentlemen, the Vault goal has been set to ${goal_inventory:.2f}."
         if reason:
             announcement += f" Reason: {reason}"
-        await bot.send_message(chat_id=ALLOWED_CHAT_ID, message_thread_id=ALLOWED_TOPIC_ID, text=announcement)
+        await context.bot.send_message(
+            chat_id=ALLOWED_CHAT_ID,
+            message_thread_id=ALLOWED_TOPIC_ID, 
+            text=announcement
+        )
     except ValueError:
         await update.message.reply_text("Invalid amount. Please enter a number.")
 
 async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for /setauthorized command."""
     global AUTHORIZED_USERS
     user_id = update.effective_user.id
     if user_id != BOT_OWNER_ID:
         await update.message.reply_text("Only the bot owner can set authorized users.")
         return
-
     if len(context.args) < 1:
         await update.message.reply_text("Please specify at least one username. Example: /setauthorized @username")
         return
@@ -118,21 +110,27 @@ async def set_authorized(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if new_users:
         await update.message.reply_text(f"Authorized users updated: {', '.join(new_users)}")
 
-def main():
-    # Register handlers
-    bot_app.add_handler(CommandHandler("setgoal", set_goal))
-    bot_app.add_handler(CommandHandler("setauthorized", set_authorized))
+async def main():
+    """Main entry point to start the bot in webhook mode."""
+    print("Starting T1 Vault Bot...")
 
-    # Fix: Wrap the async call in a function and await it properly
-    async def init_webhook():
-        await bot.set_webhook(url=WEBHOOK_URL)
+    # Create the Application
+    application = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
 
-    # Now call it here
-    asyncio.run(init_webhook())
+    # Register command handlers
+    application.add_handler(CommandHandler("setgoal", set_goal))
+    application.add_handler(CommandHandler("setauthorized", set_authorized))
 
-    # Then run Flask on Render’s assigned port
+    # The port Render provides you
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+
+    # Run the bot in webhook mode
+    await application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TELEGRAM_API_TOKEN,    # The path portion of the webhook
+        webhook_url=WEBHOOK_URL         # The full HTTPS URL to set
+    )
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
