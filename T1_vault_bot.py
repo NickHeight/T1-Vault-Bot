@@ -71,6 +71,7 @@ def get_paypal_balance():
         print(f"Error retrieving PayPal balance: {e}")
         return 0.0
 
+
 # Function to Generate Progress Bar with T1 Logo
 def generate_progress_bar(current, goal):
     progress = current / goal if goal > 0 else 0
