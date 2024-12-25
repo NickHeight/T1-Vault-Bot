@@ -33,7 +33,7 @@ paypalrestsdk.configure({
 # Vault Goal and Authorized Users
 goal_inventory = 1000  # Vault target amount in USD
 AUTHORIZED_USERS = set()
-BOT_OWNER_ID = rsdmndz  # Replace with your Telegram user ID
+BOT_OWNER_ID = 6451807462  # Replace with your Telegram user ID
 7
 # Allowed Topic and Chat IDs
 ALLOWED_TOPIC_ID = 4437
