@@ -148,7 +148,35 @@ def main():
     app.add_handler(CommandHandler("setauthorized", set_authorized))
 
     print("Bot is running...")
-    app.run_polling()
+    # Webhook URL
+WEBHOOK_URL = f"https://t1-vault-bot.onrender.com/{TELEGRAM_API_TOKEN}"  # Replace with your Render app URL
+
+# Main Function
+def main():
+    print(f"Loaded Telegram Token: {TELEGRAM_API_TOKEN[:5]}... (truncated for security)")
+
+    # Start Flask in a separate thread
+    flask_thread = Thread(target=start_flask)
+    flask_thread.start()
+
+    # Create the Telegram bot application
+    bot_app = ApplicationBuilder().token(TELEGRAM_API_TOKEN).build()
+
+    # Add handlers
+    bot_app.add_handler(CommandHandler("setgoal", set_goal))
+    bot_app.add_handler(CommandHandler("setauthorized", set_authorized))
+
+    # Set webhook
+    bot_app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.getenv("PORT", 5000)),
+        url_path=TELEGRAM_API_TOKEN,
+        webhook_url=WEBHOOK_URL
+    )
+
+if __name__ == "__main__":
+    main()
+
 
 if __name__ == "__main__":
     main()
